@@ -1,0 +1,407 @@
+// prisma/schema.prisma
+// Open Community Hub (hub-core)
+//
+// MVP schema: Hub + Service Exchange (Needs/Opportunities) with safe coordination,
+// moderation primitives, and future-friendly fields for federation/events.
+//
+// Notes:
+// - UUID everywhere (federation-ready)
+// - "private_address" / "private_location_notes" are stored but should only be revealed
+//   to accepted volunteers in application logic.
+// - Messaging is intended to be restricted to matched/accepted parties (app logic).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  Member
+  Moderator
+  Admin
+}
+
+enum TrustLevel {
+  New
+  Verified
+  Trusted
+}
+
+enum OrganizationType {
+  Faith
+  School
+  Nonprofit
+  Government
+  Business
+  InformalGroup
+  Other
+}
+
+enum VerifiedStatus {
+  Unverified
+  Verified
+}
+
+enum PostType {
+  Need
+  Opportunity
+}
+
+enum PostStatus {
+  Open
+  InProgress
+  Completed
+  Cancelled
+  Closed
+}
+
+enum Visibility {
+  // MVP: only local. Future: federated.
+  LocalOnly
+  // Future:
+  // FederatedPublic
+  // FederatedShared
+}
+
+enum LocationType {
+  Approximate
+  MeetupPoint
+  PrivateAfterAccept
+}
+
+enum PhysicalLevel {
+  Low
+  Medium
+  High
+}
+
+enum CommitmentStatus {
+  Offered
+  Accepted
+  Declined
+  Cancelled
+  Completed
+}
+
+enum FlagTargetType {
+  Post
+  Message
+  User
+  Organization
+}
+
+enum FlagReason {
+  Spam
+  Scam
+  Harassment
+  Unsafe
+  PersonalInfo
+  Other
+}
+
+enum ModerationActionType {
+  RemovePost
+  HidePost
+  WarnUser
+  SuspendUser
+  BanUser
+  VerifyOrg
+  RemoveMessage
+}
+
+enum ModerationTargetType {
+  Post
+  Message
+  User
+  Organization
+}
+
+model Hub {
+  id            String   @id @default(uuid())
+  name          String
+  slug          String   @unique
+  timezone      String
+  // Optional community center-point (GeoJSON-like string or "lat,lng" convention).
+  // Keep as String for MVP; can migrate to PostGIS later if needed.
+  locationCenter String? @map("location_center")
+
+  settings      Json?    // feature flags, controlled vocab lists, etc.
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  users         User[]
+  organizations Organization[]
+  posts         Post[]
+  flags         Flag[]
+  moderationActions ModerationAction[]
+
+  @@map("hubs")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  hubId         String   @map("hub_id")
+  hub           Hub      @relation(fields: [hubId], references: [id], onDelete: Cascade)
+
+  displayName   String   @map("display_name")
+  email         String   @unique
+  phone         String?  // optional; consider storing normalized
+  role          UserRole @default(Member)
+  trustLevel    TrustLevel @default(New) @map("trust_level")
+
+  // Optional profile enrichment
+  bio           String?
+  skillsOffered String[] @default([]) @map("skills_offered")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  lastSeenAt    DateTime? @map("last_seen_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  organizationsCreated Organization[] @relation("OrgCreatedBy")
+  postsAuthored        Post[]         @relation("PostAuthor")
+  commitments          Commitment[]   @relation("CommitmentVolunteer")
+  threadsCreated       Thread[]       @relation("ThreadCreatedBy")
+  messagesSent         Message[]      @relation("MessageSender")
+  flagsFiled           Flag[]         @relation("FlagFiledBy")
+  moderationPerformed  ModerationAction[] @relation("ModerationPerformedBy")
+
+  // Many-to-many participation in message threads
+  threadParticipants   ThreadParticipant[]
+
+  @@map("users")
+}
+
+model Organization {
+  id            String   @id @default(uuid())
+  hubId         String   @map("hub_id")
+  hub           Hub      @relation(fields: [hubId], references: [id], onDelete: Cascade)
+
+  name          String
+  type          OrganizationType
+  verifiedStatus VerifiedStatus @default(Unverified) @map("verified_status")
+
+  contactEmail  String? @map("contact_email")
+  website       String?
+
+  createdByUserId String @map("created_by_user_id")
+  createdBy     User    @relation("OrgCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  posts         Post[]
+
+  @@index([hubId])
+  @@map("organizations")
+}
+
+model Post {
+  id              String   @id @default(uuid())
+  hubId           String   @map("hub_id")
+  hub             Hub      @relation(fields: [hubId], references: [id], onDelete: Cascade)
+
+  authorUserId    String   @map("author_user_id")
+  author          User     @relation("PostAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+
+  organizationId  String?  @map("organization_id")
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  postType        PostType @map("post_type")
+  status          PostStatus @default(Open)
+  visibility      Visibility @default(LocalOnly)
+
+  title           String
+  descriptionMarkdown String @map("description_markdown")
+
+  // Controlled-ish taxonomy
+  categories      String[] @default([])
+  tags            String[] @default([])
+
+  // Time
+  startAt         DateTime? @map("start_at")
+  endAt           DateTime? @map("end_at")
+  isTimeFlexible  Boolean   @default(false) @map("is_time_flexible")
+  recurrenceRule  String?   @map("recurrence_rule") // future
+
+  // Capacity / matching
+  capacity        Int?      // for opportunities/events
+  skillsRequested String[]  @default([]) @map("skills_requested")
+  ageMin          Int?      @map("age_min")
+  physicalLevel   PhysicalLevel? @map("physical_level")
+
+  // Location & privacy
+  locationType    LocationType @default(Approximate) @map("location_type")
+  locationApproxText String? @map("location_approx_text")
+  // For MVP keep location geo as string (GeoJSON Point or "lat,lng").
+  locationGeo     String?   @map("location_geo")
+
+  // Sensitive fields: only reveal after acceptance (app logic)
+  privateLocationNotes String? @map("private_location_notes")
+  privateAddress       String? @map("private_address")
+
+  // Logistics
+  suppliesNeeded  String?   @map("supplies_needed")
+  notesForVolunteers String? @map("notes_for_volunteers")
+
+  // Expiration
+  expiresAt       DateTime? @map("expires_at")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  commitments     Commitment[]
+  threads         Thread[]
+  flags           Flag[] @relation("FlagTargetPost")
+
+  @@index([hubId, postType, status])
+  @@index([hubId, status])
+  @@index([hubId, createdAt(sort: Desc)])
+  @@map("posts")
+}
+
+model Commitment {
+  id              String   @id @default(uuid())
+  postId          String   @map("post_id")
+  post            Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  volunteerUserId String   @map("volunteer_user_id")
+  volunteer       User     @relation("CommitmentVolunteer", fields: [volunteerUserId], references: [id], onDelete: Cascade)
+
+  status          CommitmentStatus @default(Offered)
+
+  message         String?
+
+  acceptedAt      DateTime? @map("accepted_at")
+  completedAt     DateTime? @map("completed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([postId, status])
+  @@index([volunteerUserId, status])
+  @@map("commitments")
+}
+
+model Thread {
+  id              String   @id @default(uuid())
+  postId          String   @map("post_id")
+  post            Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdByUserId String   @map("created_by_user_id")
+  createdBy       User     @relation("ThreadCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  messages        Message[]
+  participants    ThreadParticipant[]
+
+  @@index([postId])
+  @@map("threads")
+}
+
+model ThreadParticipant {
+  threadId String @map("thread_id")
+  thread   Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  userId   String @map("user_id")
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  @@id([threadId, userId])
+  @@index([userId])
+  @@map("thread_participants")
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  threadId    String   @map("thread_id")
+  thread      Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  senderUserId String  @map("sender_user_id")
+  sender      User     @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: Restrict)
+
+  body        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // soft delete support (moderation)
+  isDeleted   Boolean  @default(false) @map("is_deleted")
+  deletedAt   DateTime? @map("deleted_at")
+
+  flags       Flag[] @relation("FlagTargetMessage")
+
+  @@index([threadId, createdAt])
+  @@map("messages")
+}
+
+model Flag {
+  id            String   @id @default(uuid())
+  hubId         String   @map("hub_id")
+  hub           Hub      @relation(fields: [hubId], references: [id], onDelete: Cascade)
+
+  flaggerUserId String   @map("flagger_user_id")
+  flagger       User     @relation("FlagFiledBy", fields: [flaggerUserId], references: [id], onDelete: Cascade)
+
+  targetType    FlagTargetType @map("target_type")
+  reason        FlagReason
+  details       String?
+
+  // Targets (one of these should be set depending on targetType)
+  postId        String?  @map("post_id")
+  post          Post?    @relation("FlagTargetPost", fields: [postId], references: [id], onDelete: Cascade)
+
+  messageId     String?  @map("message_id")
+  message       Message? @relation("FlagTargetMessage", fields: [messageId], references: [id], onDelete: Cascade)
+
+  targetUserId  String?  @map("target_user_id")
+  targetUser    User?    @relation(fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  organizationId String? @map("organization_id")
+  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([hubId, createdAt(sort: Desc)])
+  @@index([hubId, targetType])
+  @@map("flags")
+}
+
+model ModerationAction {
+  id              String   @id @default(uuid())
+  hubId           String   @map("hub_id")
+  hub             Hub      @relation(fields: [hubId], references: [id], onDelete: Cascade)
+
+  moderatorUserId String   @map("moderator_user_id")
+  moderator       User     @relation("ModerationPerformedBy", fields: [moderatorUserId], references: [id], onDelete: Restrict)
+
+  actionType      ModerationActionType @map("action_type")
+  targetType      ModerationTargetType @map("target_type")
+
+  // Targets (one of these should be set depending on targetType)
+  postId          String?  @map("post_id")
+  post            Post?    @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  messageId       String?  @map("message_id")
+  message         Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  targetUserId    String?  @map("target_user_id")
+  targetUser      User?    @relation(fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  organizationId  String?  @map("organization_id")
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  notes           String?
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([hubId, createdAt(sort: Desc)])
+  @@index([hubId, actionType])
+  @@map("moderation_actions")
+}
