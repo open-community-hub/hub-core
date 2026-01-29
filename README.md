@@ -20,7 +20,7 @@ Early design + scaffolding. See:
 - `docs/ARCHITECTURE.md`
 
 ## License
-TBD (recommended: Apache-2.0 or MIT)
+MIT
 
 ## Contributing
 Contributions are welcome. Please open an issue or PR and keep changes aligned with the principles in `docs/SPEC.md`.
